@@ -3,7 +3,7 @@ DBF Merger — Desktop Tool
 Merges multiple .dbf files into one combined output file.
 
 Requirements (install once):
-    pip install dbfread dbfwrite pandas
+    pip install dbfread
 
 Run:
     python dbf_merger.py
@@ -12,8 +12,10 @@ Run:
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 import os
+import struct
+import datetime
 import threading
-from datetime import datetime
+from datetime import datetime as dt
 
 # ── auto-install deps if missing ──────────────────────────────────────────────
 def _ensure(pkg, import_as=None):
@@ -24,16 +26,88 @@ def _ensure(pkg, import_as=None):
         subprocess.check_call([sys.executable, "-m", "pip", "install", pkg])
 
 _ensure("dbfread")
-_ensure("dbfwrite")
-_ensure("pandas")
 
 from dbfread import DBF
-from dbfwrite import dftodbf   # the actual module that has the function
-import pandas as pd
 
-def write_dbf(df, path):
-    """Write a DataFrame to a .dbf file using dbfwrite."""
-    dftodbf.dbfwrite(df, path)
+
+def write_dbf_null_safe(records, fields, out_path):
+    """
+    Write a DBF file from raw records + field definitions.
+
+    Nulls are written as blank spaces — the standard DBF representation
+    for missing values. No data is modified, replaced, or filled.
+    """
+    now         = dt.now()
+    num_records = len(records)
+    header_size = 32 + len(fields) * 32 + 1
+    record_size = 1 + sum(f.length for f in fields)
+
+    with open(out_path, 'wb') as fh:
+        # ── DBF header ──
+        fh.write(struct.pack('<BBBBLHH20x',
+            3,
+            now.year - 1900,
+            now.month,
+            now.day,
+            num_records,
+            header_size,
+            record_size,
+        ))
+
+        # ── Field descriptors ──
+        for f in fields:
+            name_bytes = f.name.encode('ascii').ljust(11, b'\x00')[:11]
+            fh.write(struct.pack('<11sc4xBB14x',
+                name_bytes,
+                f.type.encode('ascii'),
+                f.length,
+                f.decimal_count,
+            ))
+        fh.write(b'\r')  # header terminator
+
+        # ── Records ──
+        for rec in records:
+            fh.write(b' ')  # deletion flag (space = not deleted)
+            for f in fields:
+                val  = rec.get(f.name)
+                size = f.length
+
+                if f.type == 'C':
+                    if val is None:
+                        fh.write(b' ' * size)
+                    else:
+                        fh.write(str(val).encode('latin-1', errors='replace').ljust(size)[:size])
+
+                elif f.type == 'N':
+                    if val is None:
+                        fh.write(b' ' * size)   # blank = null in DBF standard
+                    else:
+                        if f.decimal_count > 0:
+                            s = f'{float(val):.{f.decimal_count}f}'
+                        else:
+                            s = str(int(val)) if isinstance(val, float) and val == int(val) else str(val)
+                        fh.write(s.encode('ascii').rjust(size)[:size])
+
+                elif f.type == 'D':
+                    if val is None:
+                        fh.write(b' ' * 8)
+                    else:
+                        fh.write(val.strftime('%Y%m%d').encode('ascii'))
+
+                elif f.type == 'L':
+                    if val is None:
+                        fh.write(b'?')
+                    else:
+                        fh.write(b'T' if val else b'F')
+
+                else:
+                    if val is None:
+                        fh.write(b' ' * size)
+                    else:
+                        fh.write(str(val).encode('latin-1', errors='replace').ljust(size)[:size])
+
+        fh.write(b'\x1a')  # end-of-file marker
+
 
 # ─── Color palette ────────────────────────────────────────────────────────────
 BG          = "#F7F7F5"
@@ -65,7 +139,6 @@ class DBFMergerApp(tk.Tk):
     # ─── UI ──────────────────────────────────────────────────────────────────
 
     def _build_ui(self):
-        # Header
         header = tk.Frame(self, bg=ACCENT, padx=20, pady=14)
         header.pack(fill="x")
         tk.Label(header, text="DBF Merger", font=("Segoe UI", 16, "bold"),
@@ -77,7 +150,6 @@ class DBFMergerApp(tk.Tk):
         body = tk.Frame(self, bg=BG, padx=20, pady=16)
         body.pack(fill="both", expand=True)
 
-        # Section: Input files
         self._section_label(body, "Input files")
 
         list_frame = tk.Frame(body, bg=SURFACE, relief="flat",
@@ -111,7 +183,6 @@ class DBFMergerApp(tk.Tk):
                              font=("Segoe UI", 10), fg=TEXT_MUTED, bg=SURFACE)
         self.hint.place(relx=0.5, rely=0.5, anchor="center")
 
-        # File action buttons
         btn_row = tk.Frame(body, bg=BG, pady=8)
         btn_row.pack(fill="x")
         self._btn(btn_row, "＋  Add files",       self._add_files,      primary=True).pack(side="left", padx=(0,6))
@@ -120,7 +191,6 @@ class DBFMergerApp(tk.Tk):
         self._btn(btn_row, "✕  Remove selected",   self._remove_selected).pack(side="left", padx=(0,6))
         self._btn(btn_row, "Clear all",            self._clear_all).pack(side="left")
 
-        # Section: Output
         self._section_label(body, "Output file")
 
         out_row = tk.Frame(body, bg=BG, pady=4)
@@ -132,7 +202,6 @@ class DBFMergerApp(tk.Tk):
         self.out_entry.pack(side="left", fill="x", expand=True, ipady=5, padx=(0,8))
         self._btn(out_row, "Browse…", self._browse_output).pack(side="left")
 
-        # Bottom bar
         bottom = tk.Frame(body, bg=BG, pady=10)
         bottom.pack(fill="x")
         self.merge_btn = self._btn(bottom, "  Merge  →  ", self._start_merge,
@@ -166,8 +235,8 @@ class DBFMergerApp(tk.Tk):
         self.tree.tag_configure("even", background=ROW_ALT)
 
     def _btn(self, parent, text, cmd, primary=False, big=False):
-        bg  = ACCENT    if primary else SURFACE
-        fg  = "white"   if primary else TEXT
+        bg  = ACCENT      if primary else SURFACE
+        fg  = "white"     if primary else TEXT
         abg = ACCENT_DARK if primary else ROW_ALT
         btn = tk.Button(parent, text=text, command=cmd,
                         font=("Segoe UI", 10 if big else 9),
@@ -219,7 +288,7 @@ class DBFMergerApp(tk.Tk):
     def _set_default_output(self):
         if not self.output_path.get() and self.files:
             folder = os.path.dirname(self.files[0])
-            ts     = datetime.now().strftime("%Y%m%d_%H%M%S")
+            ts     = dt.now().strftime("%Y%m%d_%H%M%S")
             self.output_path.set(os.path.join(folder, f"merged_{ts}.dbf"))
 
     def _remove_selected(self):
@@ -286,26 +355,26 @@ class DBFMergerApp(tk.Tk):
     def _merge_worker(self):
         try:
             out_path = self.output_path.get().strip()
-            frames = []
+            fields       = None
+            all_records  = []
+
             for path in self.files:
                 tbl = DBF(path, load=True, ignore_missing_memofile=True)
-                df  = pd.DataFrame(iter(tbl))
-                frames.append(df)
+                if fields is None:
+                    fields = tbl.fields   # take field definitions from first file
+                for rec in tbl:
+                    all_records.append(dict(rec))
 
-            if not frames:
-                raise ValueError("No data found in any input file.")
+            if not all_records:
+                raise ValueError("No records found in any input file.")
 
-            merged = pd.concat(frames, ignore_index=True)
+            write_dbf_null_safe(all_records, fields, out_path)
 
-            # Ensure column names are plain strings (dbfwrite needs that)
-            merged.columns = [str(c) for c in merged.columns]
-
-            write_dbf(merged, out_path)
-
-            total = len(merged)
+            total = len(all_records)
             self.after(0, self._merge_done, True,
                        f"Done! {total:,} records merged → {os.path.basename(out_path)}")
         except Exception as exc:
+            import traceback
             self.after(0, self._merge_done, False, f"Error: {exc}")
 
     def _merge_done(self, success, message):
