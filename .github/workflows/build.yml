@@ -20,7 +20,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install pyinstaller dbfread dbfwrite pandas
+          pip install pyinstaller dbfread
 
       - name: Build EXE
         run: |
