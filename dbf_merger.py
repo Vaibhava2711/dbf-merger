@@ -56,10 +56,10 @@ def write_dbf_null_safe(records, fields, out_path):
 
         # ── Field descriptors ──
         for f in fields:
-            name_bytes = f.name.encode('ascii').ljust(11, b'\x00')[:11]
+            name_bytes = f.name.encode('latin-1', errors='replace').ljust(11, b'\x00')[:11]
             fh.write(struct.pack('<11sc4xBB14x',
                 name_bytes,
-                f.type.encode('ascii'),
+                f.type.encode('latin-1', errors='replace'),
                 f.length,
                 f.decimal_count,
             ))
@@ -276,7 +276,7 @@ class DBFMergerApp(tk.Tk):
         for i, path in enumerate(self.files):
             fname = os.path.basename(path)
             try:
-                tbl     = DBF(path, load=True, ignore_missing_memofile=True)
+                tbl     = DBF(path, load=True, ignore_missing_memofile=True, encoding='latin-1')
                 records = len(tbl)
                 fields  = len(tbl.fields)
             except Exception:
@@ -359,7 +359,7 @@ class DBFMergerApp(tk.Tk):
             all_records  = []
 
             for path in self.files:
-                tbl = DBF(path, load=True, ignore_missing_memofile=True)
+                tbl = DBF(path, load=True, ignore_missing_memofile=True, encoding='latin-1')
                 if fields is None:
                     fields = tbl.fields   # take field definitions from first file
                 for rec in tbl:
